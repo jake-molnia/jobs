@@ -1,0 +1,13 @@
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      WRITE_TOKEN: ${WRITE_TOKEN:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+    volumes:
+      - apply-data:/app/data
+    restart: unless-stopped
+volumes:
+  apply-data:
