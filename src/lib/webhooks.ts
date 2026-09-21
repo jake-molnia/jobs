@@ -80,6 +80,8 @@ const dispatchRowSchema = z.object({
   type: eventTypeSchema,
 });
 const maximumAttempts = 8;
+const dispatchConcurrency = 4;
+const requestTimeoutMs = 10_000;
 
 export function initializeWebhooks(db: DatabaseSync) {
   db.exec(`
@@ -276,100 +278,117 @@ export function createWebhookStore(db: DatabaseSync) {
     },
     async dispatchDue({ limit = 20 }: { limit?: number } = {}) {
       let dispatched = 0;
-      for (let index = 0; index < Math.min(Math.max(limit, 0), 100); index++) {
-        const now = Date.now();
-        db.prepare(
-          `UPDATE webhook_deliveries SET state = 'failed', leaseUntil = NULL, leaseToken = NULL,
-          lastError = 'lease_expired', completedAt = ? WHERE state = 'inflight' AND leaseUntil <= ? AND attempts >= ?`,
-        ).run(new Date(now).toISOString(), now, maximumAttempts);
-        const row = db
-          .prepare(
-            `UPDATE webhook_deliveries SET state = 'inflight', attempts = attempts + 1,
-          leaseUntil = ?, leaseToken = ? WHERE id = (
-            SELECT d.id FROM webhook_deliveries d JOIN webhook_subscriptions s ON s.id = d.subscriptionId
-            WHERE s.enabled = 1 AND d.attempts < ? AND
-              ((d.state = 'pending' AND d.nextAttemptAt <= ?) OR (d.state = 'inflight' AND d.leaseUntil <= ?))
-            ORDER BY d.nextAttemptAt, d.rowid LIMIT 1
-          ) RETURNING id, eventId, subscriptionId, attempts, leaseToken`,
-          )
-          .get(now + 30_000, randomUUID(), maximumAttempts, now, now);
-        if (!row) break;
-        const delivery = claimedSchema.parse(row);
-        const dispatchRow = db
-          .prepare(
-            `SELECT s.url, s.secret, e.body, e.type FROM webhook_deliveries d
-          JOIN webhook_subscriptions s ON s.id = d.subscriptionId JOIN application_events e ON e.id = d.eventId
-          WHERE d.id = ?`,
-          )
-          .get(delivery.id);
-        if (!dispatchRow) continue;
-        const target = dispatchRowSchema.parse(dispatchRow);
-        let status: number | null = null;
-        let error: string | null = null;
-        try {
-          if (!destinationSchema.safeParse(target.url).success) {
-            error = "destination_not_allowed";
-          } else {
-            const timestamp = Math.floor(Date.now() / 1000).toString();
-            const signature = createHmac("sha256", target.secret)
-              .update(`${timestamp}.${target.body}`)
-              .digest("hex");
-            const response = await fetch(target.url, {
-              method: "POST",
-              redirect: "manual",
-              signal: AbortSignal.timeout(10_000),
-              headers: {
-                "content-type": "application/json",
-                "x-webhook-id": delivery.id,
-                "x-webhook-event-id": delivery.eventId,
-                "x-webhook-event": target.type,
-                "x-webhook-timestamp": timestamp,
-                "x-webhook-signature": `sha256=${signature}`,
-              },
-              body: target.body,
-            });
-            status = response.status;
-            await response.body?.cancel();
-            if (!response.ok) error = `http_${status}`;
+      let claimed = 0;
+      const claimDeadline = Date.now() + requestTimeoutMs;
+      const batchSize = Math.min(Math.max(limit, 0), 100);
+      const dispatch = async () => {
+        while (claimed < batchSize && Date.now() < claimDeadline) {
+          const now = Date.now();
+          db.prepare(
+            `UPDATE webhook_deliveries SET state = 'failed', leaseUntil = NULL, leaseToken = NULL,
+            lastError = 'lease_expired', completedAt = ? WHERE state = 'inflight' AND leaseUntil <= ? AND attempts >= ?`,
+          ).run(new Date(now).toISOString(), now, maximumAttempts);
+          const row = db
+            .prepare(
+              `UPDATE webhook_deliveries SET state = 'inflight', attempts = attempts + 1,
+            leaseUntil = ?, leaseToken = ? WHERE id = (
+              SELECT d.id FROM webhook_deliveries d JOIN webhook_subscriptions s ON s.id = d.subscriptionId
+              WHERE s.enabled = 1 AND d.attempts < ?
+                AND NOT EXISTS (
+                  SELECT 1 FROM webhook_deliveries active
+                  WHERE active.subscriptionId = d.subscriptionId
+                    AND active.state = 'inflight' AND active.leaseUntil > ?
+                ) AND
+                ((d.state = 'pending' AND d.nextAttemptAt <= ?) OR (d.state = 'inflight' AND d.leaseUntil <= ?))
+              ORDER BY d.nextAttemptAt, d.rowid LIMIT 1
+            ) RETURNING id, eventId, subscriptionId, attempts, leaseToken`,
+            )
+            .get(now + 30_000, randomUUID(), maximumAttempts, now, now, now);
+          if (!row) break;
+          claimed++;
+          const delivery = claimedSchema.parse(row);
+          const dispatchRow = db
+            .prepare(
+              `SELECT s.url, s.secret, e.body, e.type FROM webhook_deliveries d
+            JOIN webhook_subscriptions s ON s.id = d.subscriptionId JOIN application_events e ON e.id = d.eventId
+            WHERE d.id = ?`,
+            )
+            .get(delivery.id);
+          if (!dispatchRow) continue;
+          const target = dispatchRowSchema.parse(dispatchRow);
+          let status: number | null = null;
+          let error: string | null = null;
+          try {
+            if (!destinationSchema.safeParse(target.url).success) {
+              error = "destination_not_allowed";
+            } else {
+              const timestamp = Math.floor(Date.now() / 1000).toString();
+              const signature = createHmac("sha256", target.secret)
+                .update(`${timestamp}.${target.body}`)
+                .digest("hex");
+              const response = await fetch(target.url, {
+                method: "POST",
+                redirect: "manual",
+                signal: AbortSignal.timeout(requestTimeoutMs),
+                headers: {
+                  "content-type": "application/json",
+                  "x-webhook-id": delivery.id,
+                  "x-webhook-event-id": delivery.eventId,
+                  "x-webhook-event": target.type,
+                  "x-webhook-timestamp": timestamp,
+                  "x-webhook-signature": `sha256=${signature}`,
+                },
+                body: target.body,
+              });
+              status = response.status;
+              await response.body?.cancel();
+              if (!response.ok) error = `http_${status}`;
+            }
+          } catch (failure) {
+            error =
+              failure instanceof Error && failure.name === "TimeoutError"
+                ? "timeout"
+                : "network_error";
           }
-        } catch (failure) {
-          error =
-            failure instanceof Error && failure.name === "TimeoutError"
-              ? "timeout"
-              : "network_error";
-        }
-        const succeeded = error === null;
-        const terminal = succeeded || delivery.attempts >= maximumAttempts;
-        const state = succeeded ? "succeeded" : terminal ? "failed" : "pending";
-        const nextAttemptAt =
-          Date.now() +
-          Math.min(30_000 * 2 ** (delivery.attempts - 1), 3_600_000);
-        db.prepare(
-          `UPDATE webhook_deliveries SET state = ?, nextAttemptAt = ?, leaseUntil = NULL,
-          leaseToken = NULL, lastStatus = ?, lastError = ?, completedAt = ? WHERE id = ? AND leaseToken = ?`,
-        ).run(
-          state,
-          nextAttemptAt,
-          status,
-          error,
-          terminal ? new Date().toISOString() : null,
-          delivery.id,
-          delivery.leaseToken,
-        );
-        logger[succeeded ? "info" : "warn"](
-          {
-            event: "webhook.delivery",
-            deliveryId: delivery.id,
-            eventId: delivery.eventId,
-            subscriptionId: delivery.subscriptionId,
-            attempt: delivery.attempts,
+          const succeeded = error === null;
+          const terminal = succeeded || delivery.attempts >= maximumAttempts;
+          const state = succeeded ? "succeeded" : terminal ? "failed" : "pending";
+          const nextAttemptAt =
+            Date.now() +
+            Math.min(30_000 * 2 ** (delivery.attempts - 1), 3_600_000);
+          db.prepare(
+            `UPDATE webhook_deliveries SET state = ?, nextAttemptAt = ?, leaseUntil = NULL,
+            leaseToken = NULL, lastStatus = ?, lastError = ?, completedAt = ? WHERE id = ? AND leaseToken = ?`,
+          ).run(
             state,
+            nextAttemptAt,
             status,
             error,
-          },
-          succeeded ? "Webhook delivered" : "Webhook delivery failed",
-        );
-        dispatched++;
+            terminal ? new Date().toISOString() : null,
+            delivery.id,
+            delivery.leaseToken,
+          );
+          logger[succeeded ? "info" : "warn"](
+            {
+              event: "webhook.delivery",
+              deliveryId: delivery.id,
+              eventId: delivery.eventId,
+              subscriptionId: delivery.subscriptionId,
+              attempt: delivery.attempts,
+              state,
+              status,
+              error,
+            },
+            succeeded ? "Webhook delivered" : "Webhook delivery failed",
+          );
+          dispatched++;
+        }
+      };
+      const outcomes = await Promise.allSettled(
+        Array.from({ length: dispatchConcurrency }, () => dispatch()),
+      );
+      for (const outcome of outcomes) {
+        if (outcome.status === "rejected") throw outcome.reason;
       }
       return { dispatched };
     },
