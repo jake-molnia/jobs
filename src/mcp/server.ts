@@ -11,6 +11,26 @@ import {
   recordSchema,
 } from "../lib/records";
 
+import {
+  organizationInputSchema,
+  organizationPageSchema,
+  organizationPatchSchema,
+  organizationQuerySchema,
+  organizationSchema,
+} from "../lib/organizations";
+
+import {
+  webhookCreatedSchema,
+  webhookDeliveryPageSchema,
+  webhookDeliveryQuerySchema,
+  webhookEventPageSchema,
+  webhookHistoryQuerySchema,
+  webhookInputSchema,
+  webhookListSchema,
+  webhookPatchSchema,
+  webhookSchema,
+} from "../lib/webhook-schemas";
+
 export const mcpLogger = pino(
   { name: "apply-mcp", level: process.env.LOG_LEVEL || "info" },
   pino.destination(2),
@@ -43,9 +63,9 @@ function statusMessage(status: number): string {
     case 403:
       return "The API rejected authorization. Check WRITE_TOKEN in the MCP and dashboard environments.";
     case 404:
-      return "The record or API endpoint was not found.";
+      return "The requested resource or API endpoint was not found.";
     case 409:
-      return "A record with this URL already exists. Use upsert_record or update the existing record.";
+      return "A record URL or organization name conflicts with an existing entry. Find the matching entry and update it by ID.";
     case 413:
       return "The request is too large.";
     case 429:
@@ -68,23 +88,27 @@ export function createMcpServer(
       "APPLY_API_URL must not contain credentials, a query, or a fragment.",
     );
   }
-  baseUrl.pathname = `${baseUrl.pathname.replace(/\/$/, "")}/api/records`;
+  baseUrl.pathname = `${baseUrl.pathname.replace(/\/$/, "")}/api`;
 
-  const server = new McpServer({ name: "apply", version: "1.0.0" });
+  const server = new McpServer({ name: "apply", version: "1.1.0" });
 
   async function request<T extends z.ZodObject>(args: {
     tool: string;
     method: "GET" | "POST" | "PATCH";
     schema: T;
+    resource?: "records" | "organizations" | "webhooks";
     id?: string;
-    query?: z.infer<typeof listQuerySchema>;
+    suffix?: string;
+    query?: Record<string, string | number | undefined>;
     body?: unknown;
   }): Promise<CallToolResult> {
     const startedAt = performance.now();
     const requestId = randomUUID();
     try {
       const url = new URL(baseUrl);
+      url.pathname += `/${args.resource ?? "records"}`;
       if (args.id) url.pathname += `/${encodeURIComponent(args.id)}`;
+      if (args.suffix) url.pathname += `/${args.suffix}`;
       if (args.query) {
         for (const [key, value] of Object.entries(args.query)) {
           if (value !== undefined && value !== "")
@@ -158,7 +182,7 @@ export function createMcpServer(
     "list_records",
     {
       description:
-        "Search and filter records. Returns records, matching total, and status counts. Use offset and limit to page through results.",
+        "Search and filter records by text, organizationId, status, kind, priority, and due dates. Returns records, matching total, and status counts. Use offset and limit to page through results.",
       inputSchema: listQuerySchema,
       outputSchema: recordPageSchema,
       annotations: { readOnlyHint: true, openWorldHint: true },
@@ -176,7 +200,7 @@ export function createMcpServer(
     "get_record",
     {
       description:
-        "Read a complete record by its ID, including description and notes.",
+        "Read a complete record by its ID, including organizationId, description, notes, role metadata, and follow-up details.",
       inputSchema: idSchema,
       outputSchema: recordSchema,
       annotations: { readOnlyHint: true, openWorldHint: true },
@@ -212,7 +236,7 @@ export function createMcpServer(
     "update_record",
     {
       description:
-        "Change selected fields on an existing record. Omitted fields remain unchanged. Set deadline or appliedAt to null to clear them. Requires WRITE_TOKEN.",
+        "Change selected fields on an existing record. Omitted fields remain unchanged. Set nullable dates, salary, contact, or academic fields to null to clear them. Requires WRITE_TOKEN.",
       inputSchema: idSchema.extend({ patch: recordPatchSchema }),
       outputSchema: recordSchema,
       annotations: {
@@ -229,6 +253,199 @@ export function createMcpServer(
         id,
         body: patch,
         schema: recordSchema,
+      }),
+  );
+
+  server.registerTool(
+    "list_organizations",
+    {
+      description:
+        "Search the organization directory with per-status record counts. Use each organization ID with list_records to read its records.",
+      inputSchema: organizationQuerySchema,
+      outputSchema: organizationPageSchema,
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    (query) =>
+      request({
+        tool: "list_organizations",
+        resource: "organizations",
+        method: "GET",
+        query,
+        schema: organizationPageSchema,
+      }),
+  );
+
+  server.registerTool(
+    "get_organization",
+    {
+      description: "Read an organization profile and its record counts by ID.",
+      inputSchema: idSchema,
+      outputSchema: organizationSchema,
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    ({ id }) =>
+      request({
+        tool: "get_organization",
+        resource: "organizations",
+        method: "GET",
+        id,
+        schema: organizationSchema,
+      }),
+  );
+
+  server.registerTool(
+    "upsert_organization",
+    {
+      description:
+        "Create or replace an organization profile by normalized name. Omitted optional fields reset to defaults. Requires WRITE_TOKEN.",
+      inputSchema: organizationInputSchema,
+      outputSchema: organizationSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    (body) =>
+      request({
+        tool: "upsert_organization",
+        resource: "organizations",
+        method: "POST",
+        body,
+        schema: organizationSchema,
+      }),
+  );
+
+  server.registerTool(
+    "update_organization",
+    {
+      description:
+        "Change selected profile fields. Renaming an organization updates the name on its records while preserving the organization ID. Requires WRITE_TOKEN.",
+      inputSchema: idSchema.extend({ patch: organizationPatchSchema }),
+      outputSchema: organizationSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    ({ id, patch }) =>
+      request({
+        tool: "update_organization",
+        resource: "organizations",
+        method: "PATCH",
+        id,
+        body: patch,
+        schema: organizationSchema,
+      }),
+  );
+
+  server.registerTool(
+    "list_webhooks",
+    {
+      description:
+        "List outgoing webhook subscriptions without signing secrets. Requires WRITE_TOKEN.",
+      inputSchema: z.object({}).strict(),
+      outputSchema: webhookListSchema,
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    () =>
+      request({
+        tool: "list_webhooks",
+        resource: "webhooks",
+        method: "GET",
+        schema: webhookListSchema,
+      }),
+  );
+
+  server.registerTool(
+    "create_webhook",
+    {
+      description:
+        "Register an outgoing webhook. The server must allowlist the destination origin. Filters match event type and the resulting application status. The response includes a signing secret only once; store it securely in the receiver. Requires WRITE_TOKEN. Creating again creates another subscription.",
+      inputSchema: webhookInputSchema,
+      outputSchema: webhookCreatedSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+    },
+    (body) =>
+      request({
+        tool: "create_webhook",
+        resource: "webhooks",
+        method: "POST",
+        body,
+        schema: webhookCreatedSchema,
+      }),
+  );
+
+  server.registerTool(
+    "update_webhook",
+    {
+      description:
+        "Update supplied subscription fields. Set enabled=false to pause delivery; re-enabling resumes pending deliveries. Changing the URL also changes the destination for pending deliveries. Requires WRITE_TOKEN.",
+      inputSchema: idSchema.extend({ patch: webhookPatchSchema }),
+      outputSchema: webhookSchema,
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
+    },
+    ({ id, patch }) =>
+      request({
+        tool: "update_webhook",
+        resource: "webhooks",
+        method: "PATCH",
+        id,
+        body: patch,
+        schema: webhookSchema,
+      }),
+  );
+
+  server.registerTool(
+    "list_record_events",
+    {
+      description:
+        "Read immutable application change events, optionally for one record. Includes complete record snapshots and previous statuses. Requires WRITE_TOKEN.",
+      inputSchema: webhookHistoryQuerySchema,
+      outputSchema: webhookEventPageSchema,
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    (query) =>
+      request({
+        tool: "list_record_events",
+        resource: "webhooks",
+        suffix: "events",
+        method: "GET",
+        query,
+        schema: webhookEventPageSchema,
+      }),
+  );
+
+  server.registerTool(
+    "list_webhook_deliveries",
+    {
+      description:
+        "Inspect pending, inflight, succeeded, and failed webhook deliveries, optionally for one subscription. Requires WRITE_TOKEN.",
+      inputSchema: webhookDeliveryQuerySchema,
+      outputSchema: webhookDeliveryPageSchema,
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    (query) =>
+      request({
+        tool: "list_webhook_deliveries",
+        resource: "webhooks",
+        suffix: "deliveries",
+        method: "GET",
+        query,
+        schema: webhookDeliveryPageSchema,
       }),
   );
 

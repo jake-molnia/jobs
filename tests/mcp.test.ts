@@ -11,6 +11,7 @@ import pino from "pino";
 import { afterEach, describe, expect, it } from "vitest";
 import { createMcpServer } from "../src/mcp/server";
 import { recordInputSchema } from "../src/lib/records";
+import { organizationInputSchema } from "../src/lib/organizations";
 
 const silentLogger = pino({ level: "silent" });
 const entry = {
@@ -20,13 +21,14 @@ const entry = {
     url: "https://example.com/role",
   }),
   id: "3d96337f-ac29-4db1-8fbb-d96794708132",
+  organizationId: "4d96337f-ac29-4db1-8fbb-d96794708132",
   createdAt: "2026-09-21T08:00:00.000Z",
   updatedAt: "2026-09-21T08:00:00.000Z",
 };
 const page = {
   records: [entry],
   total: 1,
-  counts: { all: 1, saved: 1, applied: 0, interview: 0, closed: 0 },
+  counts: { all: 1, saved: 1, applied: 0, interview: 0, offer: 0, closed: 0 },
 };
 const cleanup: Array<() => Promise<void>> = [];
 
@@ -85,7 +87,9 @@ describe("MCP HTTP adapter", () => {
     });
     await client.connect(transport);
     const result = await client.listTools();
-    expect(result.tools).toHaveLength(4);
+    expect(result.tools.map((tool) => tool.name)).toContain(
+      "list_organizations",
+    );
     const invalid = await client.callTool({
       name: "get_record",
       arguments: { id: "invalid" },
@@ -93,15 +97,26 @@ describe("MCP HTTP adapter", () => {
     expect(invalid.isError).toBe(true);
   });
 
-  it("advertises its four tools and their write behavior", async () => {
+  it("advertises record and organization tools and their write behavior", async () => {
     const client = await connect((_request, response) => json(response, page));
     const { tools } = await client.listTools();
-    expect(tools.map((tool) => tool.name)).toEqual([
-      "list_records",
-      "get_record",
-      "upsert_record",
-      "update_record",
-    ]);
+    expect(tools.map((tool) => tool.name)).toEqual(
+      expect.arrayContaining([
+        "list_records",
+        "get_record",
+        "upsert_record",
+        "update_record",
+        "list_organizations",
+        "get_organization",
+        "upsert_organization",
+        "update_organization",
+        "list_webhooks",
+        "create_webhook",
+        "update_webhook",
+        "list_record_events",
+        "list_webhook_deliveries",
+      ]),
+    );
     expect(
       tools.find((tool) => tool.name === "list_records")?.annotations
         ?.readOnlyHint,
@@ -124,6 +139,9 @@ describe("MCP HTTP adapter", () => {
         q: "research & design",
         status: "saved",
         kind: "role",
+        organizationId: entry.organizationId,
+        priority: "high",
+        due: "follow_up",
         sort: "deadline",
         limit: 12,
         offset: 24,
@@ -136,6 +154,9 @@ describe("MCP HTTP adapter", () => {
       q: "research & design",
       status: "saved",
       kind: "role",
+      organizationId: entry.organizationId,
+      priority: "high",
+      due: "follow_up",
       sort: "deadline",
       limit: "12",
       offset: "24",
@@ -200,6 +221,176 @@ describe("MCP HTTP adapter", () => {
       auth: "Bearer test-secret",
       body: { status: "applied", appliedAt: "2026-09-21" },
     });
+  });
+
+  it("reads the organization directory and sends only supplied profile patch fields", async () => {
+    const organization = {
+      ...organizationInputSchema.parse({ name: "Example" }),
+      id: entry.organizationId,
+      createdAt: entry.createdAt,
+      updatedAt: entry.updatedAt,
+      counts: page.counts,
+    };
+    const requests: Array<{
+      path: string;
+      method: string | undefined;
+      auth: string | undefined;
+      body: unknown;
+    }> = [];
+    const client = await connect(
+      (request, response) => {
+        let body = "";
+        request.setEncoding("utf8");
+        request.on("data", (chunk: string) => {
+          body += chunk;
+        });
+        request.on("end", () => {
+          requests.push({
+            path: request.url ?? "",
+            method: request.method,
+            auth: request.headers.authorization,
+            body: body ? JSON.parse(body) : null,
+          });
+          json(
+            response,
+            request.url?.startsWith("/api/organizations?")
+              ? { organizations: [organization], total: 1 }
+              : organization,
+          );
+        });
+      },
+      { writeToken: "profile-secret" },
+    );
+    const directory = await client.callTool({
+      name: "list_organizations",
+      arguments: { q: "Example", sort: "records" },
+    });
+    expect(directory.structuredContent).toEqual({
+      organizations: [organization],
+      total: 1,
+    });
+    const fetched = await client.callTool({
+      name: "get_organization",
+      arguments: { id: organization.id },
+    });
+    expect(fetched.structuredContent).toEqual(organization);
+    const upserted = await client.callTool({
+      name: "upsert_organization",
+      arguments: { name: "Example", kind: "institute" },
+    });
+    expect(upserted.isError).not.toBe(true);
+    expect(requests[2].body).toEqual(
+      organizationInputSchema.parse({ name: "Example", kind: "institute" }),
+    );
+    const updated = await client.callTool({
+      name: "update_organization",
+      arguments: {
+        id: organization.id,
+        patch: { website: "https://example.com" },
+      },
+    });
+    expect(updated.isError).not.toBe(true);
+    expect(requests[3]).toEqual({
+      path: `/api/organizations/${organization.id}`,
+      method: "PATCH",
+      auth: "Bearer profile-secret",
+      body: { website: "https://example.com" },
+    });
+  });
+
+  it("manages webhook subscriptions through the remote API without a local allowlist", async () => {
+    const subscription = {
+      id: "5d96337f-ac29-4db1-8fbb-d96794708132",
+      url: "https://automation.example.com/hooks/applications",
+      events: ["application.status_changed"],
+      statuses: ["interview", "offer"],
+      enabled: true,
+      createdAt: entry.createdAt,
+      updatedAt: entry.updatedAt,
+    };
+    const requests: Array<{
+      path: string;
+      method: string | undefined;
+      auth: string | undefined;
+      body: unknown;
+    }> = [];
+    const client = await connect(
+      (request, response) => {
+        let body = "";
+        request.setEncoding("utf8");
+        request.on("data", (chunk: string) => {
+          body += chunk;
+        });
+        request.on("end", () => {
+          requests.push({
+            path: request.url ?? "",
+            method: request.method,
+            auth: request.headers.authorization,
+            body: body ? JSON.parse(body) : null,
+          });
+          if (request.url?.startsWith("/api/webhooks/events"))
+            return json(response, { events: [], total: 0 });
+          if (request.url?.startsWith("/api/webhooks/deliveries"))
+            return json(response, { deliveries: [] });
+          if (request.method === "POST")
+            return json(response, { ...subscription, secret: "a".repeat(64) });
+          if (request.method === "PATCH")
+            return json(response, { ...subscription, enabled: false });
+          return json(response, { subscriptions: [subscription] });
+        });
+      },
+      { writeToken: "webhook-secret" },
+    );
+    const created = await client.callTool({
+      name: "create_webhook",
+      arguments: {
+        url: subscription.url,
+        events: subscription.events,
+        statuses: subscription.statuses,
+      },
+    });
+    expect(created.structuredContent).toEqual({
+      ...subscription,
+      secret: "a".repeat(64),
+    });
+    expect(requests[0].body).toEqual({
+      url: subscription.url,
+      events: subscription.events,
+      statuses: subscription.statuses,
+      enabled: true,
+    });
+    const listed = await client.callTool({
+      name: "list_webhooks",
+      arguments: {},
+    });
+    expect(listed.structuredContent).toEqual({ subscriptions: [subscription] });
+    expect(JSON.stringify(listed)).not.toContain("secret");
+    const paused = await client.callTool({
+      name: "update_webhook",
+      arguments: { id: subscription.id, patch: { enabled: false } },
+    });
+    expect(paused.structuredContent).toEqual({
+      ...subscription,
+      enabled: false,
+    });
+    expect(requests[2].body).toEqual({ enabled: false });
+    const events = await client.callTool({
+      name: "list_record_events",
+      arguments: { recordId: entry.id, limit: 10 },
+    });
+    expect(events.structuredContent).toEqual({ events: [], total: 0 });
+    expect(requests[3].path).toBe(
+      `/api/webhooks/events?recordId=${entry.id}&limit=10&offset=0`,
+    );
+    const deliveries = await client.callTool({
+      name: "list_webhook_deliveries",
+      arguments: { subscriptionId: subscription.id },
+    });
+    expect(deliveries.structuredContent).toEqual({ deliveries: [] });
+    expect(requests[4].path).toContain(`subscriptionId=${subscription.id}`);
+    expect(
+      requests.every((request) => request.auth === "Bearer webhook-secret"),
+    ).toBe(true);
   });
 
   it("rejects invalid tool input before contacting the API", async () => {
