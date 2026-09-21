@@ -1,6 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import { ConflictError } from "./db";
+import { OrganizationConflictError } from "./organization-store";
 import { errorDetails, logger } from "./logger";
 
 const maxBodyBytes = 64 * 1024;
@@ -101,7 +102,11 @@ export async function handleRequest(
         },
         { status: 400 },
       );
-    } else if (error instanceof HttpError || error instanceof ConflictError) {
+    } else if (
+      error instanceof HttpError ||
+      error instanceof ConflictError ||
+      error instanceof OrganizationConflictError
+    ) {
       response = Response.json(
         { error: error.message, requestId },
         { status: error instanceof HttpError ? error.status : 409 },

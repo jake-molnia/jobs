@@ -15,6 +15,15 @@ import { GET as get, PATCH as patch } from "../src/app/api/records/[id]/route";
 import { GET as health } from "../src/app/api/health/route";
 import { getStore } from "../src/lib/db";
 import { recordSchema } from "../src/lib/records";
+import {
+  GET as listOrganizations,
+  POST as createOrganization,
+} from "../src/app/api/organizations/route";
+import {
+  GET as getOrganization,
+  PATCH as patchOrganization,
+} from "../src/app/api/organizations/[id]/route";
+import { organizationSchema } from "../src/lib/organizations";
 
 const directory = mkdtempSync(join(tmpdir(), "apply-api-"));
 let serial = 0;
@@ -176,4 +185,70 @@ describe("HTTP API", () => {
         .status,
     ).toBe(413);
   });
+});
+
+it("manages organization profiles through authenticated writes and public reads", async () => {
+  const data = {
+    name: "API Group",
+    kind: "institute",
+    website: "https://example.com",
+    description: "Research institute",
+  };
+  expect(
+    (
+      await createOrganization(
+        request("/api/organizations", "POST", data, "wrong"),
+      )
+    ).status,
+  ).toBe(401);
+  const created = await createOrganization(
+    request("/api/organizations", "POST", data),
+  );
+  expect(created.status).toBe(200);
+  const organization = organizationSchema.parse(await created.json());
+  const entry = await createEntry({ organization: "api group" });
+  expect(entry.organizationId).toBe(organization.id);
+  expect(
+    (
+      await listOrganizations(
+        new Request("http://localhost/api/organizations?q=API%20Group"),
+      )
+    ).status,
+  ).toBe(200);
+  expect(
+    organizationSchema.parse(
+      await (
+        await getOrganization(
+          new Request(`http://localhost/api/organizations/${organization.id}`),
+          context(organization.id),
+        )
+      ).json(),
+    ).counts.all,
+  ).toBe(1);
+  const patched = await patchOrganization(
+    request(`/api/organizations/${organization.id}`, "PATCH", {
+      name: "API Research Group",
+    }),
+    context(organization.id),
+  );
+  expect(patched.status).toBe(200);
+  expect(getStore().get(entry.id)?.organization).toBe("API Research Group");
+  expect(
+    (
+      await patchOrganization(
+        request(`/api/organizations/${organization.id}`, "PATCH", {
+          website: "javascript:alert(1)",
+        }),
+        context(organization.id),
+      )
+    ).status,
+  ).toBe(400);
+  expect(
+    (
+      await getOrganization(
+        request("/api/organizations/missing"),
+        context("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+      )
+    ).status,
+  ).toBe(404);
 });

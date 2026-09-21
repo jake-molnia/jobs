@@ -1,5 +1,11 @@
 import { getStore } from "@/lib/db";
-import { handleRequest, HttpError, parseId, readJson, requireWriteAccess } from "@/lib/http";
+import {
+  handleRequest,
+  HttpError,
+  parseId,
+  readJson,
+  requireWriteAccess,
+} from "@/lib/http";
 import { recordPatchSchema } from "@/lib/records";
 
 type Context = { params: Promise<{ id: string }> };

@@ -102,6 +102,7 @@ describe("record storage", () => {
         saved: 1,
         applied: 1,
         interview: 0,
+        offer: 0,
         closed: 0,
       });
     }
