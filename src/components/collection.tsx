@@ -1,20 +1,30 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import Link from "next/link";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useSearchParams } from "next/navigation";
+import { AppHeader } from "./app-header";
+import { RecordDetails } from "./record-details";
+import { OrganizationProfile } from "./organization-profile";
+import {
+  OrganizationMark,
+  StatusBadge,
+  DueLabel,
+  compensation,
+  kindLabels,
+  statusLabels,
+} from "./collection-display";
 import {
   Archive,
   ArrowDownWideNarrow,
   ArrowUpRight,
   Bookmark,
   Check,
-  ChevronRight,
-  Circle,
+  Award,
+  Flag,
   Inbox,
   ListFilter,
   ListIcon,
   LoaderCircle,
-  MapPin,
   MessageCircle,
   RefreshCw,
   Search,
@@ -32,10 +42,9 @@ import {
 } from "@/components/ui/sheet";
 import {
   recordPageSchema,
-  kindSchema,
+  recordSchema,
   listQuerySchema,
   type Entry,
-  type ListQuery,
   type RecordPage,
   type Status,
 } from "@/lib/records";
@@ -46,59 +55,56 @@ const statuses = [
   { value: "saved", label: "Saved", icon: Bookmark },
   { value: "applied", label: "Applied", icon: Check },
   { value: "interview", label: "Interview", icon: MessageCircle },
+  { value: "offer", label: "Offer", icon: Award },
   { value: "closed", label: "Closed", icon: Archive },
 ] satisfies { value: "all" | Status; label: string; icon: typeof Inbox }[];
-const statusLabels: Record<Status, string> = {
-  saved: "Saved",
-  applied: "Applied",
-  interview: "Interview",
-  closed: "Closed",
-};
-const kindLabels: Record<Entry["kind"], string> = {
-  role: "Role",
-  phd: "PhD",
-  research: "Research",
-  other: "Other",
-};
-const statusStyles: Record<Status, string> = {
-  saved: "text-muted-foreground",
-  applied: "text-[#acc7df] border-[#394957] bg-[#24313b]/40",
-  interview: "text-[#d9c797] border-[#504934] bg-[#393427]/40",
-  closed: "text-muted-foreground bg-accent/40",
-};
 const pageSize = 50;
-function initials(value: string) {
-  return value
-    .split(/\s+/)
-    .slice(0, 2)
-    .map((word) => word.charAt(0))
-    .join("")
-    .toUpperCase();
+function subscribeToViewport(onChange: () => void) {
+  const viewport = window.matchMedia("(max-width: 1199px)");
+  viewport.addEventListener("change", onChange);
+  return () => viewport.removeEventListener("change", onChange);
 }
-function date(value: string) {
-  return new Intl.DateTimeFormat("en", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    timeZone: "UTC",
-  }).format(new Date(value));
+function mobileViewport() {
+  return window.matchMedia("(max-width: 1199px)").matches;
 }
-function StatusBadge({ status }: { status: Status }) {
-  return (
-    <Badge className={cn("gap-1.5", statusStyles[status])}>
-      <Circle className="size-1.5 fill-current" />
-      {statusLabels[status]}
-    </Badge>
-  );
+function serverViewport() {
+  return false;
 }
 
 export function Collection() {
-  const [search, setSearch] = useState("");
-  const [query, setQuery] = useState("");
-  const [status, setStatus] = useState<"all" | Status>("all");
-  const [kind, setKind] = useState<"all" | Entry["kind"]>("all");
-  const [sort, setSort] = useState<ListQuery["sort"]>("updated");
-  const [offset, setOffset] = useState(0);
+  const searchParams = useSearchParams();
+  const isMobile = useSyncExternalStore(
+    subscribeToViewport,
+    mobileViewport,
+    serverViewport,
+  );
+  const query = listQuerySchema.shape.q
+    .catch("")
+    .parse(searchParams.get("q") ?? undefined);
+  const status =
+    listQuerySchema.shape.status
+      .catch(undefined)
+      .parse(searchParams.get("status") ?? undefined) ?? "all";
+  const kind =
+    listQuerySchema.shape.kind
+      .catch(undefined)
+      .parse(searchParams.get("kind") ?? undefined) ?? "all";
+  const sort = listQuerySchema.shape.sort
+    .catch("updated")
+    .parse(searchParams.get("sort") ?? undefined);
+  const priority = listQuerySchema.shape.priority
+    .catch(undefined)
+    .parse(searchParams.get("priority") ?? undefined);
+  const due = listQuerySchema.shape.due
+    .catch(undefined)
+    .parse(searchParams.get("due") ?? undefined);
+  const organizationId = listQuerySchema.shape.organizationId
+    .catch(undefined)
+    .parse(searchParams.get("organizationId") ?? undefined);
+  const selectedId =
+    recordSchema.shape.id.catch("").parse(searchParams.get("item") ?? "") ||
+    null;
+  const [pagination, setPagination] = useState({ baseKey: "", offset: 0 });
   const [retry, setRetry] = useState(0);
   const [result, setResult] = useState<{
     key: string;
@@ -109,29 +115,69 @@ export function Collection() {
     key: string;
     message: string;
   } | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [sheetOpen, setSheetOpen] = useState(false);
+  const [linkedRecord, setLinkedRecord] = useState<Entry | null>(null);
+  const [itemError, setItemError] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const openerRef = useRef<HTMLButtonElement | null>(null);
   const lastLoadRef = useRef<{ baseKey: string; retry: number } | null>(null);
-  const baseKey = JSON.stringify({ query, status, kind, sort });
+  const baseKey = JSON.stringify({
+    query,
+    status,
+    kind,
+    sort,
+    priority,
+    due,
+    organizationId,
+  });
+  const offset = pagination.baseKey === baseKey ? pagination.offset : 0;
+  function setOffset(value: number) {
+    setPagination({ baseKey, offset: value });
+  }
   const requestKey = JSON.stringify({ baseKey, offset, retry });
   const page = result?.baseKey === baseKey ? result.page : null;
   const error = failure?.key === requestKey ? failure.message : null;
   const pending = result?.key !== requestKey && !error;
   const records = page?.records ?? [];
-  const selected =
-    records.find((record) => record.id === selectedId) ?? records[0];
-  const filtered = Boolean(query || status !== "all" || kind !== "all");
+  const selected = selectedId
+    ? (records.find((record) => record.id === selectedId) ??
+      (linkedRecord?.id === selectedId ? linkedRecord : undefined))
+    : records[0];
+  const filtered = Boolean(
+    query || status !== "all" || kind !== "all" || priority || due,
+  );
 
+  function updateFilters(updates: Record<string, string | null>) {
+    const params = new URLSearchParams(window.location.search);
+    params.delete("item");
+    for (const [key, value] of Object.entries(updates)) {
+      if (!value || value === "all") params.delete(key);
+      else params.set(key, value);
+    }
+    setOffset(0);
+    window.history.pushState(null, "", params.size ? `?${params}` : "/");
+  }
   useEffect(() => {
-    if (search.trim() === query) return;
-    const timer = window.setTimeout(() => {
-      setQuery(search.trim());
-      setOffset(0);
-    }, 250);
-    return () => window.clearTimeout(timer);
-  }, [search, query]);
+    if (!selectedId) return;
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const response = await fetch(`/api/records/${selectedId}`, {
+          signal: controller.signal,
+          cache: "no-store",
+        });
+        if (!response.ok) throw new Error("Could not load item.");
+        const data: unknown = await response.json();
+        const parsed = recordSchema.parse(data);
+        if (!controller.signal.aborted) {
+          setLinkedRecord(parsed);
+          setItemError(null);
+        }
+      } catch {
+        if (!controller.signal.aborted) setItemError(selectedId);
+      }
+    })();
+    return () => controller.abort();
+  }, [selectedId, retry]);
 
   useEffect(() => {
     function refresh() {
@@ -151,6 +197,9 @@ export function Collection() {
     });
     if (status !== "all") params.set("status", status);
     if (kind !== "all") params.set("kind", kind);
+    if (organizationId) params.set("organizationId", organizationId);
+    if (priority) params.set("priority", priority);
+    if (due) params.set("due", due);
     const refreshAll =
       lastLoadRef.current?.baseKey === baseKey &&
       lastLoadRef.current.retry !== retry;
@@ -212,19 +261,39 @@ export function Collection() {
     }
     void load();
     return () => controller.abort();
-  }, [baseKey, requestKey, query, sort, offset, status, kind, retry]);
+  }, [
+    baseKey,
+    requestKey,
+    query,
+    sort,
+    offset,
+    status,
+    kind,
+    retry,
+    organizationId,
+    priority,
+    due,
+  ]);
 
   function clearFilters() {
-    setSearch("");
-    setQuery("");
-    setStatus("all");
-    setKind("all");
-    setOffset(0);
+    updateFilters({
+      q: null,
+      status: null,
+      kind: null,
+      priority: null,
+      due: null,
+    });
   }
   function openRecord(record: Entry, opener: HTMLButtonElement) {
     openerRef.current = opener;
-    setSelectedId(record.id);
-    if (window.matchMedia("(max-width: 1199px)").matches) setSheetOpen(true);
+    const params = new URLSearchParams(window.location.search);
+    params.set("item", record.id);
+    window.history.pushState(null, "", `?${params}`);
+  }
+  function closeRecord() {
+    const params = new URLSearchParams(window.location.search);
+    params.delete("item");
+    window.history.replaceState(null, "", params.size ? `?${params}` : "/");
   }
 
   return (
@@ -235,25 +304,11 @@ export function Collection() {
       >
         Skip to collection
       </a>
-      <header className="flex h-16 shrink-0 items-center justify-between border-b border-border px-5 md:px-7">
-        <Link
-          href="/"
-          aria-label="Index home"
-          className="inline-flex items-center gap-2.5 rounded-sm text-sm font-semibold tracking-tight outline-none focus-visible:ring-2 focus-visible:ring-ring"
-        >
-          <span className="flex size-7 items-center justify-center rounded-md border border-primary/20 bg-primary/10 text-primary">
-            <ListIcon className="size-4" />
-          </span>
-          Index
-        </Link>
-        <span className="text-[11px] tracking-wide text-muted-foreground">
-          Your collection
-        </span>
-      </header>
+      <AppHeader />
       <div className="mx-auto flex min-h-0 w-full max-w-[1800px] flex-1 flex-col md:flex-row">
-        <aside className="shrink-0 border-b border-border px-3 py-3 md:w-52 md:border-r md:border-b-0 md:px-4 md:py-8 lg:w-56">
+        <aside className="shrink-0 border-b border-border px-3 py-3 md:w-44 md:border-r md:border-b-0 md:px-4 md:py-6 lg:w-48">
           <p className="mb-3 hidden px-3 text-[10px] font-medium tracking-[0.16em] text-muted-foreground md:block">
-            COLLECTION
+            ALL ITEMS
           </p>
           <nav
             aria-label="Status"
@@ -265,8 +320,7 @@ export function Collection() {
                 type="button"
                 aria-current={status === value ? "page" : undefined}
                 onClick={() => {
-                  setStatus(value);
-                  setOffset(0);
+                  updateFilters({ status: value });
                 }}
                 className={cn(
                   "flex min-h-10 shrink-0 items-center gap-2.5 rounded-md px-3 text-[13px] outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring",
@@ -280,6 +334,7 @@ export function Collection() {
                 />
                 <span>{label}</span>
                 <span
+                  title="Across the collection"
                   className={cn(
                     "ml-auto pl-3 text-[11px] tabular-nums",
                     status === value ? "text-primary" : "text-muted-foreground",
@@ -292,10 +347,17 @@ export function Collection() {
           </nav>
         </aside>
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <div className="flex shrink-0 items-center justify-between px-5 pt-7 pb-5 md:px-8 md:pt-8">
+          {organizationId && (
+            <OrganizationProfile id={organizationId} refresh={retry} />
+          )}
+          <div className="flex shrink-0 items-center justify-between px-5 pt-5 pb-4 md:px-7">
             <div className="flex items-baseline gap-3">
               <h1 className="text-xl font-semibold tracking-tight">
-                Collection
+                {organizationId
+                  ? "Collection"
+                  : status === "all"
+                    ? "Collection"
+                    : statusLabels[status]}
               </h1>
               <span className="text-xs text-muted-foreground tabular-nums">
                 {page ? page.total : ""}
@@ -320,40 +382,18 @@ export function Collection() {
               </Button>
             </div>
           </div>
-          <div className="flex shrink-0 flex-wrap gap-2 border-b border-border px-5 pb-5 md:px-8">
-            <div className="relative min-w-44 flex-1 basis-full sm:basis-0">
-              <Search className="pointer-events-none absolute top-2.5 left-3 size-4 text-muted-foreground" />
-              <Input
-                aria-label="Search collection"
-                placeholder="Search collection…"
-                value={search}
-                maxLength={200}
-                onChange={(event) => setSearch(event.target.value)}
-                className="bg-card pr-9 pl-9"
-              />
-              {search && (
-                <button
-                  type="button"
-                  onClick={() => setSearch("")}
-                  aria-label="Clear search"
-                  className="absolute top-1 right-1 rounded p-1.5 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
-                >
-                  <X className="size-4" />
-                </button>
-              )}
-            </div>
+          <div className="flex shrink-0 flex-wrap gap-2 border-b border-border px-5 pb-4 md:px-7">
+            <CollectionSearch
+              query={query}
+              onSearch={(value) => updateFilters({ q: value })}
+            />
             <div className="relative flex-1 sm:flex-none">
               <ListFilter className="pointer-events-none absolute top-2.5 left-3 size-4 text-muted-foreground" />
               <select
                 aria-label="Filter by type"
                 value={kind}
                 onChange={(event) => {
-                  setKind(
-                    event.target.value === "all"
-                      ? "all"
-                      : kindSchema.parse(event.target.value),
-                  );
-                  setOffset(0);
+                  updateFilters({ kind: event.target.value });
                 }}
                 className="h-9 w-full rounded-md border border-input bg-card pr-2 pl-9 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring sm:w-32"
               >
@@ -370,16 +410,52 @@ export function Collection() {
                 aria-label="Sort collection"
                 value={sort}
                 onChange={(event) => {
-                  setSort(listQuerySchema.shape.sort.parse(event.target.value));
-                  setOffset(0);
+                  updateFilters({ sort: event.target.value });
                 }}
                 className="h-9 w-full rounded-md border border-input bg-card pr-2 pl-9 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring sm:w-36"
               >
                 <option value="updated">Last updated</option>
                 <option value="deadline">Deadline</option>
                 <option value="organization">Organization</option>
+                <option value="priority">Priority</option>
+                <option value="follow_up">Follow up</option>
               </select>
             </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-2 border-b border-border bg-card/25 px-5 py-2 md:px-7">
+            <select
+              aria-label="Filter by priority"
+              value={priority ?? "all"}
+              onChange={(event) =>
+                updateFilters({ priority: event.target.value })
+              }
+              className="h-7 min-w-0 rounded border border-transparent bg-transparent px-1 text-[11px] text-muted-foreground outline-none hover:border-border focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <option value="all">Any priority</option>
+              <option value="high">High priority</option>
+              <option value="normal">Normal priority</option>
+              <option value="low">Low priority</option>
+            </select>
+            <span className="h-3 w-px bg-border" />
+            <select
+              aria-label="Filter by date"
+              value={due ?? "all"}
+              onChange={(event) => updateFilters({ due: event.target.value })}
+              className="h-7 min-w-0 rounded border border-transparent bg-transparent px-1 text-[11px] text-muted-foreground outline-none hover:border-border focus-visible:ring-2 focus-visible:ring-ring"
+            >
+              <option value="all">Any date</option>
+              <option value="follow_up">Follow up due</option>
+              <option value="deadline">Deadline soon</option>
+            </select>
+            {filtered && (
+              <button
+                type="button"
+                onClick={clearFilters}
+                className="ml-auto shrink-0 rounded px-2 py-1 text-[11px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+              >
+                Reset
+              </button>
+            )}
           </div>
           <div className="flex min-h-0 flex-1">
             <div
@@ -454,14 +530,9 @@ export function Collection() {
                         }
                         aria-label={`View ${record.title} at ${record.organization}`}
                         aria-pressed={selected?.id === record.id}
-                        className="flex min-w-0 flex-1 gap-3.5 py-5 pr-0 pl-5 text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring md:pl-7"
+                        className="flex min-w-0 flex-1 gap-3 py-4 pr-0 pl-5 text-left outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring md:pl-6"
                       >
-                        <span
-                          aria-hidden="true"
-                          className="mt-0.5 flex size-10 shrink-0 items-center justify-center rounded-lg border border-border bg-background text-xs font-semibold text-muted-foreground"
-                        >
-                          {initials(record.organization)}
-                        </span>
+                        <OrganizationMark name={record.organization} />
                         <span className="min-w-0 flex-1">
                           <span className="block truncate text-[13px] leading-5 font-medium text-foreground">
                             {record.title}
@@ -477,8 +548,17 @@ export function Collection() {
                               </>
                             ) : null}
                           </span>
-                          <span className="mt-3 flex flex-wrap items-center gap-1.5">
+                          <span className="mt-2.5 flex flex-wrap items-center gap-1.5">
                             <StatusBadge status={record.status} />
+                            {record.priority === "high" && (
+                              <span
+                                title="High priority"
+                                className="text-[#d9c797]"
+                              >
+                                <Flag className="size-3" />
+                                <span className="sr-only">High priority</span>
+                              </span>
+                            )}
                             <Badge className="border-transparent bg-accent/60 text-muted-foreground">
                               {kindLabels[record.kind]}
                             </Badge>
@@ -494,9 +574,23 @@ export function Collection() {
                               </span>
                             ))}
                           </span>
-                          {record.deadline && (
-                            <span className="mt-2 block text-[11px] text-muted-foreground">
-                              Due {date(record.deadline)}
+                          {(record.followUpAt ||
+                            record.deadline ||
+                            compensation(record)) && (
+                            <span className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+                              {record.followUpAt ? (
+                                <DueLabel
+                                  value={record.followUpAt}
+                                  label="Follow up"
+                                />
+                              ) : record.deadline ? (
+                                <DueLabel value={record.deadline} label="Due" />
+                              ) : null}
+                              {compensation(record) && (
+                                <span className="text-[11px] text-muted-foreground">
+                                  {compensation(record)}
+                                </span>
+                              )}
                             </span>
                           )}
                         </span>
@@ -541,21 +635,32 @@ export function Collection() {
             </div>
             <aside
               aria-label="Item details"
-              className="hidden w-[360px] shrink-0 overflow-y-auto border-l border-border min-[1200px]:block min-[1500px]:w-[400px]"
+              className="hidden w-[380px] shrink-0 overflow-y-auto border-l border-border min-[1200px]:block min-[1500px]:w-[440px]"
             >
-              {selected ? (
-                <Details record={selected} />
+              {!isMobile && selected ? (
+                <RecordDetails record={selected} />
               ) : (
                 <div className="flex h-full flex-col items-center justify-center gap-3 px-8 text-center text-muted-foreground">
                   <ListIcon className="size-6 opacity-50" />
-                  <p className="text-xs">Select an item to view details.</p>
+                  <p className="text-xs">
+                    {selectedId
+                      ? itemError === selectedId
+                        ? "This item could not be loaded."
+                        : "Loading details…"
+                      : "Select an item to view details."}
+                  </p>
                 </div>
               )}
             </aside>
           </div>
         </main>
       </div>
-      <Sheet open={sheetOpen && Boolean(selected)} onOpenChange={setSheetOpen}>
+      <Sheet
+        open={Boolean(selectedId) && isMobile}
+        onOpenChange={(open) => {
+          if (!open) closeRecord();
+        }}
+      >
         <SheetContent
           onCloseAutoFocus={(event) => {
             event.preventDefault();
@@ -569,7 +674,15 @@ export function Collection() {
             Details for {selected?.organization ?? "this item"}
           </SheetDescription>
           <div className="min-h-0 flex-1 overflow-y-auto pt-8">
-            {selected && <Details record={selected} />}
+            {selected ? (
+              <RecordDetails record={selected} />
+            ) : (
+              <p className="p-6 text-sm text-muted-foreground" role="status">
+                {itemError === selectedId
+                  ? "This item could not be loaded."
+                  : "Loading details…"}
+              </p>
+            )}
           </div>
         </SheetContent>
       </Sheet>
@@ -577,111 +690,78 @@ export function Collection() {
   );
 }
 
-function Details({ record }: { record: Entry }) {
+function CollectionSearch({
+  query,
+  onSearch,
+}: {
+  query: string;
+  onSearch: (value: string) => void;
+}) {
+  const [searchState, setSearch] = useState({ query, value: query });
+  if (searchState.query !== query) setSearch({ query, value: query });
+  const search = searchState.query === query ? searchState.value : query;
+  const inputRef = useRef<HTMLInputElement>(null);
+  const onSearchRef = useRef(onSearch);
+  useEffect(() => {
+    onSearchRef.current = onSearch;
+  }, [onSearch]);
+  useEffect(() => {
+    if (search.trim() === query) return;
+    const timer = window.setTimeout(
+      () => onSearchRef.current(search.trim()),
+      250,
+    );
+    return () => window.clearTimeout(timer);
+  }, [search, query]);
+  useEffect(() => {
+    function shortcut(event: KeyboardEvent) {
+      if (
+        event.key === "/" &&
+        !event.metaKey &&
+        !event.ctrlKey &&
+        !(
+          event.target instanceof HTMLElement &&
+          (event.target.matches("input, textarea, select") ||
+            event.target.isContentEditable)
+        )
+      ) {
+        event.preventDefault();
+        inputRef.current?.focus();
+      }
+    }
+    window.addEventListener("keydown", shortcut);
+    return () => window.removeEventListener("keydown", shortcut);
+  }, []);
   return (
-    <div className="p-6 min-[1500px]:p-7">
-      <div className="mb-7 flex items-center justify-between">
-        <span className="text-[10px] font-medium tracking-[0.14em] text-muted-foreground">
-          DETAILS
-        </span>
-        <StatusBadge status={record.status} />
-      </div>
-      <div className="mb-5 flex size-12 items-center justify-center rounded-xl border border-border bg-card text-sm font-medium text-primary">
-        {initials(record.organization)}
-      </div>
-      <h2 className="text-lg leading-7 font-semibold tracking-tight [overflow-wrap:anywhere]">
-        {record.title}
-      </h2>
-      <p className="mt-2 text-sm text-muted-foreground [overflow-wrap:anywhere]">
-        {record.organization}
-      </p>
-      {record.location && (
-        <p className="mt-2 flex items-start gap-1.5 text-xs leading-5 text-muted-foreground">
-          <MapPin className="mt-0.5 size-3.5 shrink-0" />
-          {record.location}
-        </p>
+    <div className="relative min-w-44 flex-1 basis-full sm:basis-0">
+      <Search className="pointer-events-none absolute top-2.5 left-3 size-4 text-muted-foreground" />
+      <Input
+        ref={inputRef}
+        aria-label="Search collection"
+        placeholder="Search collection…"
+        value={search}
+        maxLength={200}
+        onChange={(event) => setSearch({ query, value: event.target.value })}
+        className="bg-card pr-9 pl-9"
+      />
+      {search ? (
+        <button
+          type="button"
+          onClick={() => setSearch({ query, value: "" })}
+          aria-label="Clear search"
+          className="absolute top-1 right-1 rounded p-1.5 text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <X className="size-4" />
+        </button>
+      ) : (
+        <kbd className="pointer-events-none absolute top-2 right-3 rounded border border-border px-1 text-[10px] text-muted-foreground">
+          /
+        </kbd>
       )}
-      <Button
-        asChild
-        variant="outline"
-        className="mt-6 w-full justify-between bg-card text-xs"
-      >
-        <a href={record.url} target="_blank" rel="noopener noreferrer">
-          Open listing
-          <ArrowUpRight className="size-4" />
-        </a>
-      </Button>
-      <dl className="my-6 space-y-3.5 border-y border-border py-5 text-xs">
-        <DetailField label="Type" value={kindLabels[record.kind]} />
-        {record.arrangement !== "unspecified" && (
-          <DetailField
-            label="Arrangement"
-            value={
-              record.arrangement.charAt(0).toUpperCase() +
-              record.arrangement.slice(1)
-            }
-          />
-        )}
-        {record.compensation && (
-          <DetailField label="Compensation" value={record.compensation} />
-        )}
-        {record.deadline && (
-          <DetailField label="Deadline" value={date(record.deadline)} />
-        )}
-        {record.appliedAt && (
-          <DetailField label="Applied" value={date(record.appliedAt)} />
-        )}
-        <DetailField label="Updated" value={date(record.updatedAt)} />
-      </dl>
-      {record.tags.length > 0 && (
-        <div className="mb-7 flex flex-wrap gap-1.5">
-          {record.tags.map((tag) => (
-            <Badge
-              key={tag}
-              className="max-w-full break-all bg-card text-muted-foreground"
-            >
-              {tag}
-            </Badge>
-          ))}
-        </div>
-      )}
-      {record.description && (
-        <section className="mb-7">
-          <h3 className="mb-3 text-xs font-medium">Overview</h3>
-          <p className="text-xs leading-[1.9] whitespace-pre-wrap text-muted-foreground [overflow-wrap:anywhere]">
-            {record.description}
-          </p>
-        </section>
-      )}
-      {record.notes && (
-        <section className="mb-7">
-          <h3 className="mb-3 text-xs font-medium">Notes</h3>
-          <p className="rounded-md border border-border bg-card p-3.5 text-xs leading-[1.9] whitespace-pre-wrap text-muted-foreground [overflow-wrap:anywhere]">
-            {record.notes}
-          </p>
-        </section>
-      )}
-      <a
-        href={record.url}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="inline-flex max-w-full items-center gap-1 rounded text-[11px] text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
-      >
-        <span className="truncate">{new URL(record.url).hostname}</span>
-        <ChevronRight className="size-3 shrink-0" />
-        <span className="sr-only">, opens in a new tab</span>
-      </a>
     </div>
   );
 }
-function DetailField({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-start justify-between gap-6">
-      <dt className="shrink-0 text-muted-foreground">{label}</dt>
-      <dd className="text-right leading-5 [overflow-wrap:anywhere]">{value}</dd>
-    </div>
-  );
-}
+
 export function CollectionSkeleton() {
   return (
     <div

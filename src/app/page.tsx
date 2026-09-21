@@ -1,4 +1,9 @@
-import { Collection } from "@/components/collection";
+import { Suspense } from "react";
+import { Collection, CollectionSkeleton } from "@/components/collection";
 export default function Page() {
-  return <Collection />;
+  return (
+    <Suspense fallback={<CollectionSkeleton />}>
+      <Collection />
+    </Suspense>
+  );
 }
