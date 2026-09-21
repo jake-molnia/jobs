@@ -14,10 +14,22 @@ export const recordInputSchema = z.object({
   compensation: z.string().trim().max(200).default(""),
   description: z.string().trim().max(20000).default(""),
   notes: z.string().trim().max(20000).default(""),
-  tags: z.array(z.string().trim().min(1).max(50)).max(20).default([]),
+  tags: z.array(z.string().trim().min(1).max(50)).max(20).transform((tags) => [...new Set(tags)]).default([]),
   deadline: dateSchema.nullable().default(null),
   appliedAt: dateSchema.nullable().default(null),
 }).strict();
+export const recordPatchSchema = recordInputSchema.partial().extend({
+  status: recordInputSchema.shape.status.removeDefault().optional(),
+  kind: recordInputSchema.shape.kind.removeDefault().optional(),
+  location: recordInputSchema.shape.location.removeDefault().optional(),
+  arrangement: recordInputSchema.shape.arrangement.removeDefault().optional(),
+  compensation: recordInputSchema.shape.compensation.removeDefault().optional(),
+  description: recordInputSchema.shape.description.removeDefault().optional(),
+  notes: recordInputSchema.shape.notes.removeDefault().optional(),
+  tags: recordInputSchema.shape.tags.removeDefault().optional(),
+  deadline: recordInputSchema.shape.deadline.removeDefault().optional(),
+  appliedAt: recordInputSchema.shape.appliedAt.removeDefault().optional(),
+}).refine((patch) => Object.values(patch).some((value) => value !== undefined), "Provide at least one field.");
 export const recordSchema = recordInputSchema.extend({
   id: z.string().uuid(),
   createdAt: z.iso.datetime(),
