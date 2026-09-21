@@ -21,6 +21,8 @@ async function main() {
 }
 
 main().catch(() => {
-  mcpLogger.fatal("MCP startup failed. Check APPLY_API_URL, WRITE_TOKEN, and LOG_LEVEL configuration.");
+  mcpLogger.fatal(
+    "MCP startup failed. Check APPLY_API_URL, WRITE_TOKEN, and LOG_LEVEL configuration.",
+  );
   process.exitCode = 1;
 });

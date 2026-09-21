@@ -1,4 +1,8 @@
-import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import {
+  createServer,
+  type IncomingMessage,
+  type ServerResponse,
+} from "node:http";
 import { once } from "node:events";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
@@ -10,7 +14,11 @@ import { recordInputSchema } from "../src/lib/records";
 
 const silentLogger = pino({ level: "silent" });
 const entry = {
-  ...recordInputSchema.parse({ title: "Research engineer", organization: "Example", url: "https://example.com/role" }),
+  ...recordInputSchema.parse({
+    title: "Research engineer",
+    organization: "Example",
+    url: "https://example.com/role",
+  }),
   id: "3d96337f-ac29-4db1-8fbb-d96794708132",
   createdAt: "2026-09-21T08:00:00.000Z",
   updatedAt: "2026-09-21T08:00:00.000Z",
@@ -34,17 +42,27 @@ async function connect(
   httpServer.listen(0, "127.0.0.1");
   await once(httpServer, "listening");
   const address = httpServer.address();
-  if (address === null || typeof address === "string") throw new Error("Missing test server address");
+  if (address === null || typeof address === "string")
+    throw new Error("Missing test server address");
   cleanup.push(async () => {
     httpServer.closeAllConnections();
-    await new Promise<void>((resolve, reject) => httpServer.close((error) => error ? reject(error) : resolve()));
+    await new Promise<void>((resolve, reject) =>
+      httpServer.close((error) => (error ? reject(error) : resolve())),
+    );
   });
-  const server = createMcpServer({ apiUrl: `http://127.0.0.1:${address.port}`, ...options }, silentLogger);
+  const server = createMcpServer(
+    { apiUrl: `http://127.0.0.1:${address.port}`, ...options },
+    silentLogger,
+  );
   const client = new Client({ name: "test-client", version: "1.0.0" });
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const [clientTransport, serverTransport] =
+    InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
   await client.connect(clientTransport);
-  cleanup.push(async () => { await client.close(); await server.close(); });
+  cleanup.push(async () => {
+    await client.close();
+    await server.close();
+  });
   return client;
 }
 
@@ -62,20 +80,36 @@ describe("MCP HTTP adapter", () => {
       stderr: "pipe",
     });
     const client = new Client({ name: "stdio-test", version: "1.0.0" });
-    cleanup.push(async () => { await client.close(); });
+    cleanup.push(async () => {
+      await client.close();
+    });
     await client.connect(transport);
     const result = await client.listTools();
     expect(result.tools).toHaveLength(4);
-    const invalid = await client.callTool({ name: "get_record", arguments: { id: "invalid" } });
+    const invalid = await client.callTool({
+      name: "get_record",
+      arguments: { id: "invalid" },
+    });
     expect(invalid.isError).toBe(true);
   });
 
   it("advertises its four tools and their write behavior", async () => {
     const client = await connect((_request, response) => json(response, page));
     const { tools } = await client.listTools();
-    expect(tools.map((tool) => tool.name)).toEqual(["list_records", "get_record", "upsert_record", "update_record"]);
-    expect(tools.find((tool) => tool.name === "list_records")?.annotations?.readOnlyHint).toBe(true);
-    expect(tools.find((tool) => tool.name === "upsert_record")?.annotations?.destructiveHint).toBe(true);
+    expect(tools.map((tool) => tool.name)).toEqual([
+      "list_records",
+      "get_record",
+      "upsert_record",
+      "update_record",
+    ]);
+    expect(
+      tools.find((tool) => tool.name === "list_records")?.annotations
+        ?.readOnlyHint,
+    ).toBe(true);
+    expect(
+      tools.find((tool) => tool.name === "upsert_record")?.annotations
+        ?.destructiveHint,
+    ).toBe(true);
   });
 
   it("sends search filters and pagination, then reads the complete record", async () => {
@@ -84,48 +118,119 @@ describe("MCP HTTP adapter", () => {
       requests.push(request.url ?? "");
       json(response, request.url?.includes(entry.id) ? entry : page);
     });
-    const listed = await client.callTool({ name: "list_records", arguments: { q: "research & design", status: "saved", kind: "role", sort: "deadline", limit: 12, offset: 24 } });
+    const listed = await client.callTool({
+      name: "list_records",
+      arguments: {
+        q: "research & design",
+        status: "saved",
+        kind: "role",
+        sort: "deadline",
+        limit: 12,
+        offset: 24,
+      },
+    });
     expect(listed.isError).not.toBe(true);
     expect(listed.structuredContent).toEqual(page);
     const query = new URL(requests[0], "http://localhost").searchParams;
-    expect(Object.fromEntries(query)).toEqual({ q: "research & design", status: "saved", kind: "role", sort: "deadline", limit: "12", offset: "24" });
-    const result = await client.callTool({ name: "get_record", arguments: { id: entry.id } });
+    expect(Object.fromEntries(query)).toEqual({
+      q: "research & design",
+      status: "saved",
+      kind: "role",
+      sort: "deadline",
+      limit: "12",
+      offset: "24",
+    });
+    const result = await client.callTool({
+      name: "get_record",
+      arguments: { id: entry.id },
+    });
     expect(result.structuredContent).toEqual(entry);
     expect(requests[1]).toBe(`/api/records/${entry.id}`);
   });
 
   it("authenticates writes and only sends supplied patch fields", async () => {
-    const requests: Array<{ method?: string; auth?: string; body: unknown }> = [];
-    const client = await connect((request, response) => {
-      let body = "";
-      request.setEncoding("utf8");
-      request.on("data", (chunk: string) => { body += chunk; });
-      request.on("end", () => {
-        requests.push({ method: request.method, auth: request.headers.authorization, body: JSON.parse(body) });
-        json(response, entry);
-      });
-    }, { writeToken: "test-secret" });
-    const created = await client.callTool({ name: "upsert_record", arguments: { title: entry.title, organization: entry.organization, url: entry.url } });
+    const requests: Array<{ method?: string; auth?: string; body: unknown }> =
+      [];
+    const client = await connect(
+      (request, response) => {
+        let body = "";
+        request.setEncoding("utf8");
+        request.on("data", (chunk: string) => {
+          body += chunk;
+        });
+        request.on("end", () => {
+          requests.push({
+            method: request.method,
+            auth: request.headers.authorization,
+            body: JSON.parse(body),
+          });
+          json(response, entry);
+        });
+      },
+      { writeToken: "test-secret" },
+    );
+    const created = await client.callTool({
+      name: "upsert_record",
+      arguments: {
+        title: entry.title,
+        organization: entry.organization,
+        url: entry.url,
+      },
+    });
     expect(created.isError).not.toBe(true);
-    const updated = await client.callTool({ name: "update_record", arguments: { id: entry.id, patch: { status: "applied", appliedAt: "2026-09-21" } } });
+    const updated = await client.callTool({
+      name: "update_record",
+      arguments: {
+        id: entry.id,
+        patch: { status: "applied", appliedAt: "2026-09-21" },
+      },
+    });
     expect(updated.isError).not.toBe(true);
-    expect(requests[0]).toEqual({ method: "POST", auth: "Bearer test-secret", body: recordInputSchema.parse({ title: entry.title, organization: entry.organization, url: entry.url }) });
-    expect(requests[1]).toEqual({ method: "PATCH", auth: "Bearer test-secret", body: { status: "applied", appliedAt: "2026-09-21" } });
+    expect(requests[0]).toEqual({
+      method: "POST",
+      auth: "Bearer test-secret",
+      body: recordInputSchema.parse({
+        title: entry.title,
+        organization: entry.organization,
+        url: entry.url,
+      }),
+    });
+    expect(requests[1]).toEqual({
+      method: "PATCH",
+      auth: "Bearer test-secret",
+      body: { status: "applied", appliedAt: "2026-09-21" },
+    });
   });
 
   it("rejects invalid tool input before contacting the API", async () => {
     let requests = 0;
-    const client = await connect((_request, response) => { requests += 1; json(response, entry); });
-    const result = await client.callTool({ name: "get_record", arguments: { id: "../records" } });
+    const client = await connect((_request, response) => {
+      requests += 1;
+      json(response, entry);
+    });
+    const result = await client.callTool({
+      name: "get_record",
+      arguments: { id: "../records" },
+    });
     expect(result.isError).toBe(true);
-    const emptyPatch = await client.callTool({ name: "update_record", arguments: { id: entry.id, patch: {} } });
+    const emptyPatch = await client.callTool({
+      name: "update_record",
+      arguments: { id: entry.id, patch: {} },
+    });
     expect(emptyPatch.isError).toBe(true);
     expect(requests).toBe(0);
   });
 
   it("returns safe actionable API errors without echoing the response body", async () => {
-    const client = await connect((_request, response) => json(response, { error: "private test-secret traceback" }, 401), { writeToken: "test-secret" });
-    const result = await client.callTool({ name: "list_records", arguments: {} });
+    const client = await connect(
+      (_request, response) =>
+        json(response, { error: "private test-secret traceback" }, 401),
+      { writeToken: "test-secret" },
+    );
+    const result = await client.callTool({
+      name: "list_records",
+      arguments: {},
+    });
     expect(result.isError).toBe(true);
     expect(JSON.stringify(result)).toContain("WRITE_TOKEN");
     expect(JSON.stringify(result)).not.toContain("test-secret");
@@ -133,8 +238,13 @@ describe("MCP HTTP adapter", () => {
   });
 
   it("validates responses before returning content to the MCP client", async () => {
-    const client = await connect((_request, response) => json(response, { records: "bad", private: "secret" }));
-    const result = await client.callTool({ name: "list_records", arguments: {} });
+    const client = await connect((_request, response) =>
+      json(response, { records: "bad", private: "secret" }),
+    );
+    const result = await client.callTool({
+      name: "list_records",
+      arguments: {},
+    });
     expect(result.isError).toBe(true);
     expect(JSON.stringify(result)).toContain("invalid response");
     expect(JSON.stringify(result)).not.toContain("secret");
@@ -142,14 +252,29 @@ describe("MCP HTTP adapter", () => {
 
   it("times out an unresponsive API", async () => {
     const client = await connect(() => {}, { timeoutMs: 25 });
-    const result = await client.callTool({ name: "list_records", arguments: {} });
+    const result = await client.callTool({
+      name: "list_records",
+      arguments: {},
+    });
     expect(result.isError).toBe(true);
     expect(JSON.stringify(result)).toContain("timed out");
   });
 
   it("rejects API addresses with embedded secrets or query parameters", () => {
-    expect(() => createMcpServer({ apiUrl: "https://name:secret@example.com" }, silentLogger)).toThrow("must not contain");
-    expect(() => createMcpServer({ apiUrl: "https://example.com?token=secret" }, silentLogger)).toThrow("must not contain");
-    expect(() => createMcpServer({ apiUrl: "file:///tmp/socket" }, silentLogger)).toThrow();
+    expect(() =>
+      createMcpServer(
+        { apiUrl: "https://name:secret@example.com" },
+        silentLogger,
+      ),
+    ).toThrow("must not contain");
+    expect(() =>
+      createMcpServer(
+        { apiUrl: "https://example.com?token=secret" },
+        silentLogger,
+      ),
+    ).toThrow("must not contain");
+    expect(() =>
+      createMcpServer({ apiUrl: "file:///tmp/socket" }, silentLogger),
+    ).toThrow();
   });
 });
