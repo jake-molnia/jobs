@@ -110,6 +110,7 @@ export function Collection() {
     key: string;
     baseKey: string;
     page: RecordPage;
+    nextOffset: number;
   } | null>(null);
   const [failure, setFailure] = useState<{
     key: string;
@@ -119,7 +120,11 @@ export function Collection() {
   const [itemError, setItemError] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const openerRef = useRef<HTMLButtonElement | null>(null);
-  const lastLoadRef = useRef<{ baseKey: string; retry: number } | null>(null);
+  const lastLoadRef = useRef<{
+    baseKey: string;
+    retry: number;
+    page: RecordPage;
+  } | null>(null);
   const baseKey = JSON.stringify({
     query,
     status,
@@ -217,37 +222,42 @@ export function Collection() {
     }
     async function load() {
       try {
-        const first = await fetchPage(refreshAll ? 0 : offset);
-        const refreshedRecords = [...first.records];
-        if (refreshAll) {
+        const previous = lastLoadRef.current;
+        let first = await fetchPage(refreshAll ? 0 : offset);
+        const existing =
+          !refreshAll && offset > 0 && previous?.baseKey === baseKey
+            ? previous.page.records
+            : [];
+        const existingIds = new Set(existing.map((record) => record.id));
+        const collectionChanged =
+          existing.length > 0 &&
+          (first.total !== previous?.page.total ||
+            first.records.some((record) => existingIds.has(record.id)));
+        if (collectionChanged) first = await fetchPage(0);
+        const reload = refreshAll || collectionChanged;
+        const loadedRecords = [...first.records];
+        let nextOffset = (reload ? 0 : offset) + first.records.length;
+        if (reload) {
           for (
             let pageOffset = pageSize;
             pageOffset <= offset && pageOffset < first.total;
             pageOffset += pageSize
           ) {
             const nextPage = await fetchPage(pageOffset);
-            refreshedRecords.push(...nextPage.records);
+            loadedRecords.push(...nextPage.records);
+            nextOffset = pageOffset + nextPage.records.length;
           }
         }
         if (controller.signal.aborted) return;
-        setResult((previous) => {
-          const existing =
-            !refreshAll && offset > 0 && previous?.baseKey === baseKey
-              ? previous.page.records
-              : [];
-          const merged = new Map(
-            [...existing, ...refreshedRecords].map((record) => [
-              record.id,
-              record,
-            ]),
-          );
-          return {
-            key: requestKey,
-            baseKey,
-            page: { ...first, records: [...merged.values()] },
-          };
-        });
-        lastLoadRef.current = { baseKey, retry };
+        const merged = new Map(
+          [...(reload ? [] : existing), ...loadedRecords].map((record) => [
+            record.id,
+            record,
+          ]),
+        );
+        const page = { ...first, records: [...merged.values()] };
+        setResult({ key: requestKey, baseKey, page, nextOffset });
+        lastLoadRef.current = { baseKey, retry, page };
         setFailure(null);
         if (resetScroll) listRef.current?.scrollTo({ top: 0 });
       } catch {
@@ -617,12 +627,12 @@ export function Collection() {
                   >
                     {records.length} of {page.total}
                   </span>
-                  {records.length < page.total && (
+                  {result && result.nextOffset < page.total && (
                     <Button
                       variant="outline"
                       size="sm"
                       disabled={Boolean(pending)}
-                      onClick={() => setOffset(records.length)}
+                      onClick={() => setOffset(result.nextOffset)}
                     >
                       {pending ? (
                         <LoaderCircle className="animate-spin" />

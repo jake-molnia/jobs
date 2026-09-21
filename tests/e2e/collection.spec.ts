@@ -240,3 +240,70 @@ test("load more retrieves records beyond the first page", async ({
     page.getByRole("button", { name: selectedName ?? "" }),
   ).toHaveAttribute("aria-pressed", "true");
 });
+
+for (const count of [51, 103]) {
+  test(`load more recovers a moved record across ${count} records`, async ({
+    page,
+    request,
+  }) => {
+    const tag = `moving-pagination-${count}`;
+    let movedId = "";
+    for (let index = 0; index < count; index++) {
+      const response = await request.post("/api/records", {
+        headers,
+        data: {
+          title: `Moving item ${index}`,
+          organization: `Moving lab ${String(index).padStart(3, "0")}`,
+          url: `https://example.com/${tag}/${index}`,
+          tags: [tag],
+        },
+      });
+      expect(response.ok()).toBeTruthy();
+      if (index === count - 1) {
+        movedId = recordSchema.parse(await response.json()).id;
+      }
+    }
+    await page.goto(`/?q=${tag}&sort=organization`);
+    const rows = page.getByRole("button", { name: /^View / });
+    await expect(rows).toHaveCount(50);
+    const update = await request.patch(`/api/records/${movedId}`, {
+      headers,
+      data: { organization: "A moved lab" },
+    });
+    expect(update.ok()).toBeTruthy();
+    await page.getByRole("button", { name: "Load more" }).click();
+    await expect(rows).toHaveCount(Math.min(100, count));
+    await expect(rows.first()).toHaveAccessibleName(
+      `View Moving item ${count - 1} at A moved lab`,
+    );
+    if (count > 100) {
+      await page.getByRole("button", { name: "Load more" }).click();
+    }
+    await expect(rows).toHaveCount(count);
+    await expect(page.getByRole("button", { name: "Load more" })).toHaveCount(0);
+    expect(new Set(await rows.evaluateAll((nodes) =>
+      nodes.map((node) => node.getAttribute("aria-label")),
+    )).size).toBe(count);
+    await page.getByRole("button", { name: "Refresh collection" }).click();
+    await expect(page.locator("#collection-list")).toHaveAttribute("aria-busy", "false");
+    await expect(rows).toHaveCount(count);
+
+    await page.goto(`/?q=${tag}&sort=organization&status=saved`);
+    await expect(rows).toHaveCount(50);
+    const removedFromFilter = await request.patch(`/api/records/${movedId}`, {
+      headers,
+      data: { status: "closed" },
+    });
+    expect(removedFromFilter.ok()).toBeTruthy();
+    await page.getByRole("button", { name: "Load more" }).click();
+    await expect(rows).toHaveCount(Math.min(100, count - 1));
+    await expect(rows.first()).toHaveAccessibleName(
+      "View Moving item 0 at Moving lab 000",
+    );
+    if (count - 1 > 100) {
+      await page.getByRole("button", { name: "Load more" }).click();
+    }
+    await expect(rows).toHaveCount(count - 1);
+    await expect(page.getByRole("button", { name: "Load more" })).toHaveCount(0);
+  });
+}
