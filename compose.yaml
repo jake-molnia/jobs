@@ -6,6 +6,7 @@ services:
     environment:
       WRITE_TOKEN: ${WRITE_TOKEN:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      WEBHOOK_ALLOWED_ORIGINS: ${WEBHOOK_ALLOWED_ORIGINS:-}
     volumes:
       - apply-data:/app/data
     restart: unless-stopped

@@ -1,0 +1,1 @@
+The certificate and key in this directory are self-signed fixtures for the local HTTPS webhook receiver in Playwright tests. They are not deployment credentials. The test app trusts this certificate through NODE_EXTRA_CA_CERTS; the receiver listens only on loopback.

@@ -16,6 +16,8 @@ export default defineConfig({
       DATABASE_PATH: resolve(`test-results/e2e-${process.pid}.db`),
       WRITE_TOKEN: "e2e-write-token",
       LOG_LEVEL: "error",
+      WEBHOOK_ALLOWED_ORIGINS: "https://127.0.0.1:3101",
+      NODE_EXTRA_CA_CERTS: resolve("tests/fixtures/webhook-localhost-cert.pem"),
     },
     timeout: 120000,
   },
