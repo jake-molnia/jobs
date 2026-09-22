@@ -15,20 +15,23 @@ permissions:
 
 jobs:
   publish:
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-24.04
+    runs-on: depot-ubuntu-24.04
     timeout-minutes: 30
     permissions:
       contents: read
-      packages: write
       id-token: write
     steps:
-      - name: Check Depot configuration
+      - name: Check publishing configuration
         env:
           DEPOT_PROJECT_ID: ${{ vars.DEPOT_PROJECT_ID }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
         run: |
           if [ -z "$DEPOT_PROJECT_ID" ]; then
-            echo "::error::Set the DEPOT_PROJECT_ID repository variable and configure Depot's GitHub OIDC trust relationship. See docs/containers.md."
+            echo "::error::Set the DEPOT_PROJECT_ID repository variable in Depot CI. See docs/containers.md."
+            exit 1
+          fi
+          if [ -z "$GHCR_TOKEN" ]; then
+            echo "::error::Add a GHCR_TOKEN secret with write:packages to Depot CI for this repository. See docs/containers.md."
             exit 1
           fi
 
@@ -56,8 +59,8 @@ jobs:
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GHCR_TOKEN }}
 
       - name: Build and publish both architectures
         id: build

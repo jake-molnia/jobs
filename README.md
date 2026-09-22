@@ -137,7 +137,7 @@ WRITE_TOKEN=your-token docker compose up --build -d
 
 Compose persists the database in the `apply-data` volume. Place a reverse proxy with HTTPS in front for remote access. The container runs as the non-root `node` user and checks `/api/health`. No hosting service is provisioned by this repository.
 
-To publish and share images, the `Publish image` GitHub Actions workflow uses Depot's native amd64 and arm64 builders and pushes to GitHub Container Registry. After the [one-time setup and first publish](docs/containers.md), run the image without a local build:
+To publish and share images, the `Publish image` Depot CI workflow uses Depot's native amd64 and arm64 builders and pushes to GitHub Container Registry. After the [one-time setup and first publish](docs/containers.md), run the image without a local build:
 
 ```sh
 docker compose -f compose.registry.yaml pull
