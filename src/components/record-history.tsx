@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Circle, History } from "lucide-react";
 import {
   applicationEventPageSchema,
@@ -20,12 +20,14 @@ export function RecordHistory({
     key: string;
     events: ApplicationEvent[];
     total: number;
+    nextOffset: number;
   } | null>(null);
+  const cache = useRef<typeof result>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const [pagination, setPagination] = useState({ id, offset: 0 });
   const offset = pagination.id === id ? pagination.offset : 0;
-  const key = JSON.stringify({ id, updatedAt, retry });
-  const requestKey = JSON.stringify({ key, offset });
+  const key = JSON.stringify({ id, updatedAt });
+  const requestKey = JSON.stringify({ key, offset, retry });
   const [loadedRequest, setLoadedRequest] = useState("");
   const pending = loadedRequest !== requestKey && failure !== requestKey;
   const events = result?.key === key ? result.events : [];
@@ -33,9 +35,17 @@ export function RecordHistory({
     const controller = new AbortController();
     void (async () => {
       try {
-        const all: ApplicationEvent[] = [];
-        let total = 0;
-        for (let pageOffset = 0; pageOffset <= offset; pageOffset += 20) {
+        const previous = cache.current;
+        const retained = previous?.key === key ? previous : null;
+        const all = new Map(retained?.events.map((event) => [event.id, event]));
+        let total = retained?.total ?? 0;
+        let nextOffset = retained?.nextOffset ?? 0;
+        let appending = retained !== null;
+        for (
+          let pageOffset = nextOffset;
+          pageOffset <= offset;
+          pageOffset += 20
+        ) {
           const response = await fetch(
             `/api/records/${id}/events?limit=20&offset=${pageOffset}`,
             { signal: controller.signal, cache: "no-store" },
@@ -43,12 +53,28 @@ export function RecordHistory({
           if (!response.ok) throw new Error("Could not load history.");
           const data: unknown = await response.json();
           const page = applicationEventPageSchema.parse(data);
-          all.push(...page.events);
+          if (
+            appending &&
+            (page.total !== total ||
+              !page.events.length ||
+              page.events.some((event) => all.has(event.id)))
+          ) {
+            all.clear();
+            appending = false;
+            pageOffset = -20;
+            continue;
+          }
+          for (const event of page.events) all.set(event.id, event);
           total = page.total;
-          if (all.length >= total) break;
+          nextOffset = page.events.length
+            ? pageOffset + page.events.length
+            : total;
+          if (!page.events.length || nextOffset >= total) break;
         }
         if (!controller.signal.aborted) {
-          setResult({ key, events: all, total });
+          const next = { key, events: [...all.values()], total, nextOffset };
+          cache.current = next;
+          setResult(next);
           setLoadedRequest(requestKey);
           setFailure(null);
         }
@@ -123,13 +149,13 @@ export function RecordHistory({
           </li>
         ))}
       </ol>
-      {result?.key === key && events.length < result.total && (
+      {result?.key === key && result.nextOffset < result.total && (
         <Button
           className="mt-4"
           variant="ghost"
           size="sm"
           disabled={pending}
-          onClick={() => setPagination({ id, offset: events.length })}
+          onClick={() => setPagination({ id, offset: result.nextOffset })}
         >
           {pending ? "Loading…" : "Earlier activity"}
         </Button>

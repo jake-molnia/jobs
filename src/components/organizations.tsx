@@ -34,15 +34,19 @@ export function Organizations() {
   if (searchState.query !== query) setSearch({ query, value: query });
   const search = searchState.query === query ? searchState.value : query;
   const [refresh, setRefresh] = useState(0);
+  const [retry, setRetry] = useState(0);
   const baseKey = JSON.stringify({ query, sort });
   const [pagination, setPagination] = useState({ baseKey, offset: 0 });
   const offset = pagination.baseKey === baseKey ? pagination.offset : 0;
-  const key = JSON.stringify({ baseKey, offset, refresh });
+  const key = JSON.stringify({ baseKey, offset, refresh, retry });
   const [result, setResult] = useState<{
     key: string;
     baseKey: string;
+    refresh: number;
+    nextOffset: number;
     page: z.infer<typeof organizationPageSchema>;
   } | null>(null);
+  const cache = useRef<typeof result>(null);
   const [failure, setFailure] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const page = result?.baseKey === baseKey ? result.page : null;
@@ -65,9 +69,25 @@ export function Organizations() {
     const controller = new AbortController();
     void (async () => {
       try {
-        const organizations = [];
-        let first: z.infer<typeof organizationPageSchema> | null = null;
-        for (let pageOffset = 0; pageOffset <= offset; pageOffset += 50) {
+        const previous = cache.current;
+        const retained =
+          previous?.baseKey === baseKey && previous.refresh === refresh
+            ? previous
+            : null;
+        const organizations = new Map(
+          retained?.page.organizations.map((organization) => [
+            organization.id,
+            organization,
+          ]),
+        );
+        let total = retained?.page.total ?? 0;
+        let nextOffset = retained?.nextOffset ?? 0;
+        let appending = retained !== null;
+        for (
+          let pageOffset = nextOffset;
+          pageOffset <= offset;
+          pageOffset += 50
+        ) {
           const response = await fetch(
             `/api/organizations?${new URLSearchParams({ q: query, sort, limit: "50", offset: String(pageOffset) })}`,
             { signal: controller.signal, cache: "no-store" },
@@ -75,12 +95,38 @@ export function Organizations() {
           if (!response.ok) throw new Error("Could not load organizations.");
           const data: unknown = await response.json();
           const parsed = organizationPageSchema.parse(data);
-          first ??= parsed;
-          organizations.push(...parsed.organizations);
-          if (organizations.length >= parsed.total) break;
+          if (
+            appending &&
+            (parsed.total !== total ||
+              !parsed.organizations.length ||
+              parsed.organizations.some((organization) =>
+                organizations.has(organization.id),
+              ))
+          ) {
+            organizations.clear();
+            appending = false;
+            pageOffset = -50;
+            continue;
+          }
+          for (const organization of parsed.organizations) {
+            organizations.set(organization.id, organization);
+          }
+          total = parsed.total;
+          nextOffset = parsed.organizations.length
+            ? pageOffset + parsed.organizations.length
+            : total;
+          if (!parsed.organizations.length || nextOffset >= total) break;
         }
-        if (!controller.signal.aborted && first) {
-          setResult({ key, baseKey, page: { ...first, organizations } });
+        if (!controller.signal.aborted) {
+          const next = {
+            key,
+            baseKey,
+            refresh,
+            nextOffset,
+            page: { total, organizations: [...organizations.values()] },
+          };
+          cache.current = next;
+          setResult(next);
           setFailure(null);
         }
       } catch {
@@ -181,7 +227,7 @@ export function Organizations() {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => setRefresh((value) => value + 1)}
+                onClick={() => setRetry((value) => value + 1)}
               >
                 Try again
               </Button>
@@ -274,7 +320,7 @@ export function Organizations() {
               <span role="status">
                 {page.organizations.length} of {page.total}
               </span>
-              {page.organizations.length < page.total && (
+              {result && result.nextOffset < page.total && (
                 <Button
                   size="sm"
                   variant="outline"
@@ -282,7 +328,7 @@ export function Organizations() {
                   onClick={() =>
                     setPagination({
                       baseKey,
-                      offset: page.organizations.length,
+                      offset: result.nextOffset,
                     })
                   }
                 >
