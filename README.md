@@ -151,3 +151,16 @@ npm run test:e2e
 ```
 
 Unit and integration tests use temporary SQLite databases. Browser tests run a separate app on port 3100 with a disposable database under `test-results`. Local database files, tokens, and generated test artifacts are excluded from Git.
+
+## Continuous integration
+
+Depot CI runs the `Check` workflow in `.depot/workflows/check.yml` on pushes and same-repository pull requests using a `depot-ubuntu-24.04` sandbox. It runs lint, type checking, unit/integration tests, the production build, and Chromium browser tests. Failed runs retain browser test artifacts. Depot CI currently does not trigger workflows for pull requests from forks; those changes require a maintainer-triggered verification run.
+
+Connect the repository through **GitHub Code Access** in the Depot dashboard. The Depot Code Access app supplies repository access and workflow triggers; Depot reports job results as GitHub checks. See the [Depot CI setup guide](https://depot.dev/docs/ci/quickstart).
+
+To verify access or run the workflow against your working tree with the Depot CLI:
+
+```sh
+depot ci migrate preflight --yes
+depot ci run --workflow .depot/workflows/check.yml
+```
