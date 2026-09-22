@@ -151,3 +151,9 @@ npm run test:e2e
 ```
 
 Unit and integration tests use temporary SQLite databases. Browser tests run a separate app on port 3100 with a disposable database under `test-results`. Local database files, tokens, and generated test artifacts are excluded from Git.
+
+## Continuous integration
+
+The GitHub Actions `Check` workflow uses the `depot-ubuntu-24.04` runner. It runs lint, type checking, unit/integration tests, the production build, and Chromium browser tests.
+
+Depot managed GitHub Actions runners require an organization-owned repository. Connect that GitHub organization through the Depot dashboard and grant the Depot GitHub App access to this repository before enabling the workflow. For public repositories, also allow public repositories in the organization’s runner group. See the [Depot runner setup guide](https://depot.dev/docs/github-actions/quickstart).
