@@ -137,6 +137,15 @@ WRITE_TOKEN=your-token docker compose up --build -d
 
 Compose persists the database in the `apply-data` volume. Place a reverse proxy with HTTPS in front for remote access. The container runs as the non-root `node` user and checks `/api/health`. No hosting service is provisioned by this repository.
 
+To publish and share images, the `Publish image` GitHub Actions workflow uses Depot's native amd64 and arm64 builders and pushes to GitHub Container Registry. After the [one-time setup and first publish](docs/containers.md), run the image without a local build:
+
+```sh
+docker compose -f compose.registry.yaml pull
+WRITE_TOKEN=your-token docker compose -f compose.registry.yaml up -d
+```
+
+The default image is `ghcr.io/jake-molnia/jobs:latest`. Set `APPLY_IMAGE` to use a version tag or digest. See [container publishing and deployment](docs/containers.md) for authentication, package visibility, and tags.
+
 Back up SQLite using its online backup command, for example `sqlite3 /persistent/apply.db ".backup '/backups/apply.db'"`. Copying only the database file while the app is writing can miss data in its WAL. Restore with the app stopped. The database contains webhook signing secrets as well as the collection; protect its file and backups.
 
 ## Logs and checks
