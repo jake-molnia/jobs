@@ -17,6 +17,7 @@ let store: ReturnType<typeof createWebhookStore>;
 let receiver: Server;
 let destination: string;
 let responseStatus = 204;
+let beforeResponse: (path: string) => Promise<void>;
 let received: {
   body: string;
   headers: Record<string, string | string[] | undefined>;
@@ -52,6 +53,7 @@ beforeEach(async () => {
   initializeWebhooks(db);
   store = createWebhookStore(db);
   responseStatus = 204;
+  beforeResponse = async () => {};
   received = [];
   receiver = createServer(async (request, response) => {
     const chunks: Buffer[] = [];
@@ -62,6 +64,7 @@ beforeEach(async () => {
       headers: request.headers,
       path: request.url ?? "",
     });
+    await beforeResponse(request.url ?? "");
     response.writeHead(
       responseStatus,
       responseStatus === 302
@@ -116,6 +119,93 @@ describe("durable webhook delivery", () => {
       lastStatus: 204,
       lastError: null,
     });
+  });
+
+  it("delivers to a healthy subscription while a slow backlog holds one lease", async () => {
+    const slow = store.create({ url: `${destination}/slow` });
+    for (let index = 0; index < 6; index++) enqueue(null, entry());
+    const healthy = store.create({ url: `${destination}/healthy` });
+    enqueue(null, entry());
+    const gate = Promise.withResolvers<void>();
+    beforeResponse = (path) =>
+      path === "/slow" ? gate.promise : Promise.resolve();
+    const dispatch = store.dispatchDue();
+    try {
+      await vi.waitFor(() => {
+        expect(store.listDeliveries({ subscriptionId: healthy.id })[0]).toMatchObject({
+          state: "succeeded",
+          attempts: 1,
+        });
+      });
+      expect(received.filter((item) => item.path === "/slow")).toHaveLength(1);
+      expect(store.listDeliveries({ subscriptionId: slow.id }).filter(
+        (item) => item.state === "inflight",
+      )).toHaveLength(1);
+      expect(await createWebhookStore(db).dispatchDue()).toEqual({ dispatched: 0 });
+      store.update(slow.id, { enabled: false });
+    } finally {
+      gate.resolve();
+      await dispatch;
+    }
+    expect(received.filter((item) => item.path === "/slow")).toHaveLength(1);
+    expect(store.listDeliveries({ subscriptionId: slow.id }).filter(
+      (item) => item.state === "pending" && item.attempts === 0,
+    )).toHaveLength(6);
+  });
+
+  it("yields a slow backlog after the claim window so the next poll can serve new subscriptions", async () => {
+    store.create({ url: `${destination}/slow` });
+    for (let index = 0; index < 6; index++) enqueue(null, entry());
+    const gate = Promise.withResolvers<void>();
+    beforeResponse = () => gate.promise;
+    const dispatch = store.dispatchDue();
+    try {
+      await vi.waitFor(() => expect(received).toHaveLength(1));
+      const healthy = store.create({ url: `${destination}/healthy` });
+      enqueue(null, entry());
+      const now = vi.spyOn(Date, "now").mockReturnValue(Date.now() + 10_001);
+      try {
+        gate.resolve();
+        expect(await dispatch).toEqual({ dispatched: 1 });
+      } finally {
+        now.mockRestore();
+      }
+      expect(store.listDeliveries({ subscriptionId: healthy.id })[0].attempts).toBe(0);
+      await store.dispatchDue();
+      expect(store.listDeliveries({ subscriptionId: healthy.id })[0].state).toBe("succeeded");
+    } finally {
+      gate.resolve();
+      await dispatch;
+    }
+  });
+
+  it("caps concurrent requests at four and claims only the bounded batch", async () => {
+    for (let index = 0; index < 8; index++) {
+      store.create({ url: `${destination}/receiver-${index}` });
+    }
+    enqueue(null, entry());
+    const gate = Promise.withResolvers<void>();
+    let active = 0;
+    let peak = 0;
+    beforeResponse = async () => {
+      active++;
+      peak = Math.max(peak, active);
+      await gate.promise;
+      active--;
+    };
+    const dispatch = store.dispatchDue({ limit: 6 });
+    try {
+      await vi.waitFor(() => expect(received).toHaveLength(4));
+      expect(store.listDeliveries().filter((item) => item.state === "inflight")).toHaveLength(4);
+      expect(store.listDeliveries().filter((item) => item.attempts === 0)).toHaveLength(4);
+    } finally {
+      gate.resolve();
+      await dispatch;
+    }
+    expect(await dispatch).toEqual({ dispatched: 6 });
+    expect(peak).toBe(4);
+    expect(received).toHaveLength(6);
+    expect(store.listDeliveries().filter((item) => item.attempts === 0)).toHaveLength(2);
   });
 
   it("stores one status event, filters on destination status, and suppresses no-op writes", () => {
