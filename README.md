@@ -154,6 +154,13 @@ Unit and integration tests use temporary SQLite databases. Browser tests run a s
 
 ## Continuous integration
 
-The GitHub Actions `Check` workflow uses the `depot-ubuntu-24.04` runner. It runs lint, type checking, unit/integration tests, the production build, and Chromium browser tests.
+Depot CI runs the `Check` workflow in `.depot/workflows/check.yml` on pushes and pull requests using a `depot-ubuntu-24.04` sandbox. It runs lint, type checking, unit/integration tests, the production build, and Chromium browser tests. Failed runs retain browser test artifacts.
 
-Depot managed GitHub Actions runners require an organization-owned repository. Connect that GitHub organization through the Depot dashboard and grant the Depot GitHub App access to this repository before enabling the workflow. For public repositories, also allow public repositories in the organization’s runner group. See the [Depot runner setup guide](https://depot.dev/docs/github-actions/quickstart).
+Connect the repository through **GitHub Code Access** in the Depot dashboard. The Depot Code Access app supplies repository access and workflow triggers; Depot reports job results as GitHub checks. See the [Depot CI setup guide](https://depot.dev/docs/ci/quickstart).
+
+To verify access or run the workflow against your working tree with the Depot CLI:
+
+```sh
+depot ci migrate preflight --yes
+depot ci run --workflow .depot/workflows/check.yml
+```
