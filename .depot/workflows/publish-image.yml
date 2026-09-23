@@ -83,3 +83,46 @@ jobs:
           docker buildx imagetools inspect "$IMAGE@$DIGEST" --raw > manifest.json
           jq -e '[.manifests[].platform | select(.os == "linux") | .architecture] | contains(["amd64", "arm64"])' manifest.json
           echo "Published \`$IMAGE@$DIGEST\` for linux/amd64 and linux/arm64." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Package Flux image reference
+        if: github.ref == 'refs/heads/main'
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          mkdir -p "$RUNNER_TEMP/jobs-release/manifests"
+          cat > "$RUNNER_TEMP/jobs-release/manifests/kustomization.yaml" <<'YAML'
+          apiVersion: kustomize.config.k8s.io/v1beta1
+          kind: Kustomization
+          resources:
+          - image.yaml
+          YAML
+          cat > "$RUNNER_TEMP/jobs-release/manifests/image.yaml" <<YAML
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: jobs-release-image
+            namespace: flux-system
+            labels:
+              reconcile.fluxcd.io/watch: Enabled
+          data:
+            JOBS_IMAGE: "$IMAGE@$DIGEST"
+          YAML
+          printf 'FROM scratch\nCOPY manifests/ /\n' > "$RUNNER_TEMP/jobs-release/Dockerfile"
+
+      - name: Publish Flux release bundle
+        if: github.ref == 'refs/heads/main'
+        uses: depot/build-push-action@98e78adca7817480b8185f474a400b451d74e287 # v1.18.0
+        with:
+          project: ${{ vars.DEPOT_PROJECT_ID }}
+          context: ${{ runner.temp }}/jobs-release
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.image.outputs.name }}:release-sha-${{ github.sha }}
+            ${{ steps.image.outputs.name }}:release-latest
+          provenance: false
+          sbom: false
